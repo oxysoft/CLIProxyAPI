@@ -16,6 +16,13 @@ const (
 	// Claude represents the Anthropic Claude provider identifier.
 	Claude = "claude"
 
+	// ClaudeCLI represents the Claude Code CLI subprocess provider identifier.
+	// Mirrors the GeminiCLI pattern: same upstream model family, different
+	// transport. Spawns the local `claude` binary in print mode and translates
+	// its stream-json output to OpenAI Responses SSE. Subscription-billed
+	// natively via the user's existing Claude Code OAuth credentials.
+	ClaudeCLI = "claude-cli"
+
 	// OpenAI represents the OpenAI provider identifier.
 	OpenAI = "openai"
 

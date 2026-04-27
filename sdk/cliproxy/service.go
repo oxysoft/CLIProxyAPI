@@ -901,6 +901,12 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "claude-cli":
+		// claude-cli serves the same Claude models as the HTTP path; the
+		// difference is only the transport. Reusing GetClaudeModels keeps a
+		// single source of truth for which Claude IDs are routable.
+		models = registry.GetClaudeModels()
+		models = applyExcludedModels(models, excluded)
 	case "codex":
 		codexPlanType := ""
 		if a.Attributes != nil {

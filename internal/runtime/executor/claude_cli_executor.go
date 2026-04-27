@@ -155,6 +155,19 @@ func (e *ClaudeCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	var execErr error
 	defer reporter.TrackFailure(ctx, &execErr)
 
+	// Translate the inbound caller payload (e.g. OpenAI Responses) into our
+	// claude-cli invocation envelope. The translator pair registered in
+	// internal/translator/claude-cli/openai/responses handles this; if no
+	// pair is registered for the source format the bytes pass through and
+	// parseClaudeCLIInvocation will surface a clear error below.
+	req.Payload = sdktranslator.TranslateRequest(
+		opts.SourceFormat,
+		sdktranslator.FromString("claude-cli"),
+		req.Model,
+		req.Payload,
+		opts.Stream,
+	)
+
 	inv, err := parseClaudeCLIInvocation(req)
 	if err != nil {
 		execErr = err
@@ -190,6 +203,16 @@ func (e *ClaudeCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 func (e *ClaudeCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.TrackFailure(ctx, &err)
+
+	// Caller payload → claude-cli invocation envelope. Mirror Execute's
+	// behavior so both code paths see a parsed invocation.
+	req.Payload = sdktranslator.TranslateRequest(
+		opts.SourceFormat,
+		sdktranslator.FromString("claude-cli"),
+		req.Model,
+		req.Payload,
+		opts.Stream,
+	)
 
 	inv, err := parseClaudeCLIInvocation(req)
 	if err != nil {

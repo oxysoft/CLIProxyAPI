@@ -38,21 +38,43 @@ import (
 
 const claudeCLIDefaultAuthFile = "claude-cli-default.json"
 
-// claudeCLIAuthRecord mirrors the JSON shape of cliproxy/auth.Auth as it is
-// persisted to disk. We define a local struct rather than importing the
-// runtime type to keep cmd's dependency surface minimal.
+// claudeCLIAuthRecord matches the on-disk JSON shape consumed by
+// internal/watcher/synthesizer.synthesizeFileAuths. Only the keys recognised
+// by the synthesizer are surfaced here:
+//
+//   - "type"     dispatches to the Provider identifier in the runtime auth.
+//                Must be "claude-cli" so service.go's switch routes to
+//                NewClaudeCLIExecutor.
+//   - "email"    becomes the auth Label (used in logging / the dashboard).
+//   - "disabled" toggles the auth off without removing the file.
+//
+// The remainder is captured in `metadata` so it survives round-trips through
+// the watcher and shows up in the management API for diagnostics.
 type claudeCLIAuthRecord struct {
-	ID            string            `json:"id"`
-	Provider      string            `json:"provider"`
-	Label         string            `json:"label,omitempty"`
-	Status        string            `json:"status"`
-	StatusMessage string            `json:"status_message,omitempty"`
-	Disabled      bool              `json:"disabled"`
-	Unavailable   bool              `json:"unavailable"`
-	Attributes    map[string]string `json:"attributes,omitempty"`
-	Metadata      map[string]any    `json:"metadata,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at,omitempty"`
+	Type     string         `json:"type"`
+	Email    string         `json:"email,omitempty"`
+	Disabled bool           `json:"disabled"`
+	Metadata map[string]any `json:"-"`
+}
+
+// MarshalJSON flattens metadata into the top-level object so the synthesizer
+// sees recognised keys at the JSON root, while still preserving arbitrary
+// diagnostic fields.
+func (r claudeCLIAuthRecord) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"type":     r.Type,
+		"disabled": r.Disabled,
+	}
+	if r.Email != "" {
+		out["email"] = r.Email
+	}
+	for k, v := range r.Metadata {
+		if _, taken := out[k]; taken {
+			continue
+		}
+		out[k] = v
+	}
+	return json.Marshal(out)
 }
 
 // DoClaudeCLIInit registers the claude-cli executor without any OAuth flow.
@@ -100,21 +122,17 @@ func DoClaudeCLIInit(cfg *config.Config, _ *LoginOptions) {
 	authPath := filepath.Join(authDir, claudeCLIDefaultAuthFile)
 	now := time.Now().UTC()
 	record := claudeCLIAuthRecord{
-		ID:       "claude-cli-" + uuid.NewString(),
-		Provider: "claude-cli",
-		Label:    "Local Claude Code CLI",
-		Status:   "active",
-		Attributes: map[string]string{
+		Type:     "claude-cli",
+		Email:    "Local Claude Code CLI",
+		Disabled: false,
+		Metadata: map[string]any{
+			"id":                 "claude-cli-" + uuid.NewString(),
 			"transport":          "subprocess",
 			"binary":             binary,
 			"credentials_source": credsPath,
-		},
-		Metadata: map[string]any{
-			"installed_at":      now.Format(time.RFC3339),
+			"installed_at":       now.Format(time.RFC3339),
 			"claude_cli_version": claudeCLIVersionOrEmpty(binary),
 		},
-		CreatedAt: now,
-		UpdatedAt: now,
 	}
 
 	body, err := json.MarshalIndent(record, "", "  ")

@@ -47,15 +47,25 @@ import (
 // invocations of ConvertClaudeCLIResponseToOpenAIResponses. The runtime
 // stores the value through the `*param` pointer so that successive lines
 // from the same response share state.
+//
+// A subtle invariant: with `--include-partial-messages` CC emits BOTH the
+// per-token `stream_event` deltas AND a cumulative `assistant` recap when
+// each message finishes. We must not double-stream the same text. The
+// `streamingTextActive` flag flips on the first text_delta we see and tells
+// the `assistant` handler to skip its content (it would be a duplicate of
+// what we already streamed). When `--include-partial-messages` is off (older
+// CC, edge configurations) we never see stream_events and fall through to
+// the legacy `assistant`-frame handler.
 type claudeCLIResponseState struct {
-	seq        int
-	responseID string
-	createdAt  int64
-	itemID     string
-	textBuf    strings.Builder
-	openedItem bool
-	closedItem bool
-	completed  bool
+	seq                 int
+	responseID          string
+	createdAt           int64
+	itemID              string
+	textBuf             strings.Builder
+	openedItem          bool
+	closedItem          bool
+	completed           bool
+	streamingTextActive bool
 }
 
 var dataTag = []byte("data:")
@@ -105,7 +115,59 @@ func ConvertClaudeCLIResponseToOpenAIResponses(_ context.Context, _ string, _, _
 		out = append(out, emitCreated(st, nextSeq))
 		out = append(out, emitInProgress(st, nextSeq))
 
+	case "stream_event":
+		// CC's --include-partial-messages emits Anthropic Messages API events
+		// nested inside a `stream_event` envelope so callers can stream at
+		// token granularity. Mirror the Anthropic→Responses translation done
+		// for the HTTP claude executor: each text_delta becomes one SSE
+		// output_text.delta; content_block_stop closes the message item.
+		inner := root.Get("event")
+		switch inner.Get("type").String() {
+		case "content_block_start":
+			// Open the message item on the first content block; the cumulative
+			// `assistant` frame will arrive later but we'll skip it because
+			// streamingTextActive will be set.
+			if !st.openedItem {
+				if mid := root.Get("event.parent_message_id").String(); mid != "" {
+					st.itemID = mid
+				} else if mid := st.itemID; mid == "" {
+					st.itemID = "msg_" + st.responseID
+				}
+				out = append(out, emitOutputItemAdded(st, nextSeq))
+				out = append(out, emitContentPartAdded(st, nextSeq))
+				st.openedItem = true
+			}
+		case "content_block_delta":
+			delta := inner.Get("delta")
+			if delta.Get("type").String() != "text_delta" {
+				// Drop thinking_delta, tool_use input_json_delta, etc.
+				return out
+			}
+			text := delta.Get("text").String()
+			if text == "" {
+				return out
+			}
+			st.streamingTextActive = true
+			st.textBuf.WriteString(text)
+			payload := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
+			payload, _ = sjson.SetBytes(payload, "sequence_number", nextSeq())
+			payload, _ = sjson.SetBytes(payload, "item_id", st.itemID)
+			payload, _ = sjson.SetBytes(payload, "delta", text)
+			out = append(out, emit("response.output_text.delta", payload))
+		case "content_block_stop":
+			// Don't close the output_item here: the `result` frame is the
+			// authoritative end-of-turn signal. Multi-step agentic runs emit
+			// many content_block_stops mid-turn, and we want one item per
+			// final response.
+		}
+
 	case "assistant":
+		// If we already streamed text via stream_event, the cumulative
+		// `assistant` frame is a redundant recap; skip it to avoid
+		// double-emitting.
+		if st.streamingTextActive {
+			return out
+		}
 		// Open the message item lazily, on the first assistant frame, so
 		// short prompts that produce no output (CC error before reply) don't
 		// emit a half-formed envelope.

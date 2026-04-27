@@ -116,6 +116,61 @@ func TestClaudeCLIResponseTranslation_DropsInternalToolFrames(t *testing.T) {
 	}
 }
 
+// TestClaudeCLIResponseTranslation_PartialMessagesStreamEvents verifies that
+// when CC is invoked with --include-partial-messages, the per-token
+// `stream_event` frames are surfaced as response.output_text.delta events
+// (one per token) and the redundant cumulative `assistant` frame is skipped
+// rather than double-emitting the assembled text.
+func TestClaudeCLIResponseTranslation_PartialMessagesStreamEvents(t *testing.T) {
+	transcript := []string{
+		`data: {"type":"system","subtype":"init","session_id":"sess-2","model":"claude-opus-4-7"}`,
+		`data: {"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_partial","role":"assistant","content":[]}},"session_id":"sess-2"}`,
+		`data: {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"session_id":"sess-2"}`,
+		`data: {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}},"session_id":"sess-2"}`,
+		`data: {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}},"session_id":"sess-2"}`,
+		`data: {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"!"}},"session_id":"sess-2"}`,
+		`data: {"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"sess-2"}`,
+		// Cumulative recap from CC — must be SKIPPED because we already streamed.
+		`data: {"type":"assistant","message":{"id":"msg_partial","role":"assistant","content":[{"type":"text","text":"Hello!"}]},"session_id":"sess-2"}`,
+		`data: {"type":"stream_event","event":{"type":"message_stop"},"session_id":"sess-2"}`,
+		`data: {"type":"result","subtype":"success","result":"Hello!","session_id":"sess-2","usage":{"input_tokens":2,"output_tokens":3}}`,
+	}
+
+	var param any
+	var allChunks [][]byte
+	for _, line := range transcript {
+		chunks := ConvertClaudeCLIResponseToOpenAIResponses(context.Background(), "claude-opus-4-7", nil, nil, []byte(line), &param)
+		allChunks = append(allChunks, chunks...)
+	}
+
+	// Concatenate all output_text.delta payloads — should reconstruct "Hello!"
+	// exactly once (3 token chunks). If the assistant recap leaked through, we
+	// would see "Hello!Hello!" or similar duplication.
+	var deltas []string
+	var sawCompleted bool
+	for _, chunk := range allChunks {
+		event, payload := splitFrame(chunk)
+		switch event {
+		case "response.output_text.delta":
+			deltas = append(deltas, gjson.Get(payload, "delta").String())
+		case "response.completed":
+			sawCompleted = true
+			if got := gjson.Get(payload, "response.usage.output_tokens").Int(); got != 3 {
+				t.Fatalf("response.completed.usage.output_tokens = %d, want 3", got)
+			}
+		}
+	}
+	if got := strings.Join(deltas, ""); got != "Hello!" {
+		t.Fatalf("concatenated deltas = %q, want %q (chunks=%d)", got, "Hello!", len(deltas))
+	}
+	if len(deltas) != 3 {
+		t.Fatalf("expected 3 token-level deltas, got %d", len(deltas))
+	}
+	if !sawCompleted {
+		t.Fatalf("expected response.completed frame, did not see one")
+	}
+}
+
 func splitFrame(chunk []byte) (event, payload string) {
 	for _, line := range strings.Split(string(chunk), "\n") {
 		switch {

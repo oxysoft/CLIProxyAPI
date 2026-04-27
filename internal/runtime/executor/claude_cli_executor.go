@@ -352,7 +352,12 @@ func (e *ClaudeCLIExecutor) startClaudeCLI(ctx context.Context, inv *claudeCLIIn
 	args := []string{"--print"}
 	// stream-json gives us per-event NDJSON. Even Execute (non-stream) reads
 	// it; aggregateClaudeCLIStreamJSON joins assistant text into one reply.
-	args = append(args, "--output-format", "stream-json", "--verbose")
+	// --include-partial-messages emits incremental token chunks instead of
+	// only complete assistant messages, so callers get streaming UX matching
+	// what they see from a direct API call. Without it CC buffers the entire
+	// reply (and any intermediate tool-bracketed reasoning) until the final
+	// `result` frame, which on a multi-minute agentic run reads like a stall.
+	args = append(args, "--output-format", "stream-json", "--verbose", "--include-partial-messages")
 	if inv.Model != "" {
 		args = append(args, "--model", inv.Model)
 	}
